@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# AI SANDBOX - Version v55.0 (Modules dépendances incluses)
+# AI SANDBOX - Version finale v58.0 (Chemin run.py corrigé)
 # =============================================================================
 
 RED='\033[0;31m'
@@ -59,61 +59,42 @@ pip3 install flask-cors --break-system-packages 2>&1 | tee "$LOG_DIR/pip.log"
 ok "Paquets installés"
 
 # =============================================================================
-# 3. RÉCUPÉRATION DU KERNEL
+# 3. RÉCUPÉRATION DU KERNEL LOCAL
 # =============================================================================
-log "Récupération du kernel..."
+log "Récupération du kernel local..."
 
-KERNEL_URL="https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/netboot-3.23.4/vmlinuz-virt"
-
-if [ ! -f "vmlinuz" ]; then
-    wget -q --show-progress -O vmlinuz "$KERNEL_URL"
+if [ -f "/boot/vmlinuz-virt" ]; then
+    cp /boot/vmlinuz-virt vmlinuz
+    ok "Kernel copié depuis /boot/vmlinuz-virt"
+elif [ -f "/boot/vmlinuz-lts" ]; then
+    cp /boot/vmlinuz-lts vmlinuz
+    ok "Kernel copié depuis /boot/vmlinuz-lts"
+else
+    err "Aucun kernel trouvé dans /boot/"
+    exit 1
 fi
+
 ok "Kernel: $(ls -lh vmlinuz | awk '{print $5}')"
 
 # =============================================================================
-# 4. EXTRACTION DE TOUS LES MODULES NÉCESSAIRES (avec dépendances)
+# 4. EXTRACTION DES MODULES
 # =============================================================================
-log "Extraction des modules 9p et dépendances..."
-
-if [ ! -d "$MODULES_SRC" ]; then
-    err "Modules non trouvés dans $MODULES_SRC"
-    err "Version noyau hôte: $(uname -r)"
-    exit 1
-fi
-ok "Modules trouvés"
+log "Extraction des modules 9p..."
 
 mkdir -p modules_all
 
-# Modules 9p et leurs dépendances
-MODULES_NEEDED=(
-    "netfs.ko"
-    "fscache.ko"
-    "9pnet.ko"
-    "9pnet_virtio.ko"
-    "9p.ko"
-    "virtio.ko"
-    "virtio_ring.ko"
-    "virtio_pci.ko"
-    "virtio_pci_modern.ko"
-    "virtio_pci_legacy.ko"
-)
+find "$MODULES_SRC" -type f \( \
+    -name "9p.ko*" -o \
+    -name "9pnet*.ko*" -o \
+    -name "virtio*.ko*" -o \
+    -name "netfs.ko*" \
+\) -exec cp {} modules_all/ \; 2>/dev/null
 
-log "Recherche des modules nécessaires..."
-for mod in "${MODULES_NEEDED[@]}"; do
-    found=$(find "$MODULES_SRC" -name "$mod" 2>/dev/null | head -1)
-    if [ -n "$found" ]; then
-        cp "$found" modules_all/
-        ok "  ✓ $mod"
-    else
-        log "  ✗ $mod non trouvé"
-    fi
+for mod in modules_all/*.gz; do
+    [ -f "$mod" ] && gunzip -f "$mod" 2>/dev/null
 done
 
-# Copier aussi tous les modules 9p supplémentaires
-find "$MODULES_SRC" -name "9p*.ko*" -exec cp {} modules_all/ \; 2>/dev/null
-find "$MODULES_SRC" -name "virtio*.ko*" -exec cp {} modules_all/ \; 2>/dev/null
-
-NB_MODULES=$(ls modules_all/*.ko* 2>/dev/null | wc -l)
+NB_MODULES=$(ls modules_all/*.ko 2>/dev/null | wc -l)
 ok "$NB_MODULES modules extraits"
 
 # =============================================================================
@@ -133,6 +114,7 @@ for cmd in $(./busybox --list 2>/dev/null); do
     ln -sf busybox $cmd
 done
 cd ../..
+ok "Busybox configuré"
 
 # Python
 cp /usr/bin/python3 initramfs/usr/bin/
@@ -143,14 +125,15 @@ cp -r /usr/lib/python$PYVER initramfs/usr/lib/ 2>/dev/null || true
 cp /usr/lib/libpython3* initramfs/usr/lib/ 2>/dev/null || true
 
 # Libs système
-cp /lib/ld-musl-x86_64.so.1 initramfs/lib/ 2>/dev/null || true
-cp /lib/libc.musl-x86_64.so.1 initramfs/lib/ 2>/dev/null || true
+for lib in /lib/ld-musl-x86_64.so.1 /lib/libc.musl-x86_64.so.1 /lib/libresolv.so.2; do
+    [ -f "$lib" ] && cp "$lib" initramfs/lib/
+done
 
-# Tous les modules
-cp modules_all/*.ko* initramfs/modules/ 2>/dev/null
+# Modules
+cp modules_all/*.ko initramfs/modules/ 2>/dev/null
 
 # =============================================================================
-# 6. SCRIPT INIT (chargement ordonné)
+# 6. SCRIPT INIT (avec run.py à la racine)
 # =============================================================================
 cat > initramfs/init << 'EOF'
 #!/bin/busybox sh
@@ -158,62 +141,45 @@ cat > initramfs/init << 'EOF'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
 echo "========================================="
-echo "AI SANDBOX v55.0"
+echo "AI SANDBOX v58.0"
 echo "========================================="
 
 /bin/busybox mount -t proc proc /proc
 /bin/busybox mount -t sysfs sysfs /sys
 /bin/busybox mount -t devtmpfs devtmpfs /dev
 
-echo "[1/4] Chargement modules de base..."
+echo "[1/4] Chargement des modules..."
 for mod in /modules/virtio.ko /modules/virtio_ring.ko; do
-    [ -f "$mod" ] && /bin/busybox insmod "$mod" 2>/dev/null && echo "  ✓ $(basename $mod)"
+    [ -f "$mod" ] && /bin/busybox insmod "$mod" 2>/dev/null
 done
+[ -f /modules/netfs.ko ] && /bin/busybox insmod /modules/netfs.ko 2>/dev/null
+[ -f /modules/9pnet.ko ] && /bin/busybox insmod /modules/9pnet.ko 2>/dev/null
+[ -f /modules/9pnet_virtio.ko ] && /bin/busybox insmod /modules/9pnet_virtio.ko 2>/dev/null
+[ -f /modules/9p.ko ] && /bin/busybox insmod /modules/9p.ko 2>/dev/null
 
-echo "[2/4] Chargement modules netfs et fscache..."
-for mod in /modules/netfs.ko /modules/fscache.ko; do
-    [ -f "$mod" ] && /bin/busybox insmod "$mod" 2>/dev/null && echo "  ✓ $(basename $mod)"
-done
+echo "[2/4] Modules chargés:"
+/bin/busybox lsmod | head -8
 
-echo "[3/4] Chargement modules 9p..."
-for mod in /modules/9pnet.ko /modules/9pnet_virtio.ko /modules/9p.ko; do
-    if [ -f "$mod" ]; then
-        /bin/busybox insmod "$mod" 2>/dev/null && echo "  ✓ $(basename $mod)"
-    fi
-done
-
-echo "[4/4] Montage et exécution..."
+echo "[3/4] Montage 9p..."
 /bin/busybox mkdir -p /mnt
 
-# Attendre que les modules soient chargés
-/bin/busybox sleep 2
-
-# Tentative de montage
-for i in 1 2 3 4 5; do
+for i in 1 2 3; do
     if /bin/busybox mount -t 9p -o trans=virtio,version=9p2000.L m /mnt 2>/dev/null; then
-        echo "  ✓ 9p monté (tentative $i)"
+        echo "  ✓ 9p monté"
         MOUNTED=1
         break
     fi
-    echo "  Tentative $i échouée"
     /bin/busybox sleep 1
 done
 
-if [ "$MOUNTED" = "1" ]; then
+echo "[4/4] Exécution..."
+if [ "$MOUNTED" = "1" ] && [ -f /mnt/user_script.py ]; then
     echo ""
-    if [ -f /mnt/user_script.py ]; then
-        echo "=== DEBUT EXECUTION ==="
-        /usr/bin/python3 /mnt/run.py 2>&1
-        echo "=== FIN EXECUTION ==="
-    else
-        echo "  ✗ Script non trouvé: /mnt/user_script.py"
-        echo "  Contenu de /mnt:"
-        /bin/busybox ls -la /mnt/
-    fi
+    echo "=== DEBUT EXECUTION ==="
+    /usr/bin/python3 /run.py /mnt/user_script.py 2>&1
+    echo "=== FIN EXECUTION ==="
 else
-    echo "  ✗ Échec du montage 9p"
-    echo "  Modules chargés:"
-    /bin/busybox lsmod | head -20
+    echo "  ✗ Échec montage ou script absent"
 fi
 
 echo ""
@@ -223,30 +189,35 @@ EOF
 chmod 755 initramfs/init
 
 # =============================================================================
-# 7. SCRIPT D'EXÉCUTION PYTHON
+# 7. SCRIPT D'EXÉCUTION PYTHON (à la racine de l'initramfs)
 # =============================================================================
 cat > initramfs/run.py << 'EOF'
 #!/usr/bin/python3
 import sys, os
 
-SCRIPT = "/mnt/user_script.py"
+if len(sys.argv) < 2:
+    print("Usage: run.py <script_file>")
+    sys.exit(1)
+
+SCRIPT = sys.argv[1]
 RESULT = "/mnt/result.txt"
 
 print("=" * 50)
 print("EXECUTION SANDBOX")
 print("=" * 50)
+print(f"Python: {sys.version}")
+print(f"Script: {SCRIPT}")
+print("-" * 40)
 
 try:
     with open(SCRIPT, 'r') as f:
         code = f.read()
     
-    print("Exécution du code...")
     exec(code, {'__name__': '__main__'})
     
     with open(RESULT, 'w') as f:
         f.write("SUCCESS")
     
-    print("-" * 40)
     print("SUCCESS")
     
 except Exception as e:
@@ -276,7 +247,7 @@ ok "Initramfs construit: $SIZE"
 rm -rf initramfs modules_all
 
 # =============================================================================
-# 9. TEST AVEC VÉRIFICATION DU MONTAGE
+# 9. TEST
 # =============================================================================
 log "Test avec QEMU..."
 
@@ -298,23 +269,13 @@ timeout 15 qemu-system-x86_64 \
     -no-reboot \
     > "$LOG_DIR/qemu_test.log" 2>&1
 
-# Analyse
 if grep -q "SUCCESS" "$LOG_DIR/qemu_test.log"; then
     ok "✅ TEST RÉUSSI !"
-    echo ""
-    grep -A10 "=== DEBUT EXECUTION ===" "$LOG_DIR/qemu_test.log" | head -15
-elif grep -q "9p monté" "$LOG_DIR/qemu_test.log"; then
-    ok "✅ 9p monté, vérifier l'exécution"
-    echo ""
-    grep "9p monté" "$LOG_DIR/qemu_test.log"
+    grep -A10 "=== DEBUT EXECUTION ===" "$LOG_DIR/qemu_test.log"
 else
-    err "❌ Échec du montage 9p"
+    err "❌ Échec"
     echo ""
-    echo "=== MODULES CHARGÉS ==="
-    grep -A10 "Modules chargés:" "$LOG_DIR/qemu_test.log" || echo "Non trouvé"
-    echo ""
-    echo "=== DERNIÈRES LIGNES ==="
-    tail -40 "$LOG_DIR/qemu_test.log"
+    tail -30 "$LOG_DIR/qemu_test.log"
 fi
 
 # =============================================================================
@@ -364,7 +325,6 @@ def execute():
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         
-        # Sauvegarder le log
         with open(LOG_DIR / f"qemu_{exec_id}.log", 'w') as f:
             f.write(result.stdout)
         
@@ -384,7 +344,7 @@ def execute():
         return jsonify({
             "success": success,
             "execution_id": exec_id,
-            "output": output.strip() if output.strip() else "Aucune sortie",
+            "output": output.strip(),
             "duration": round(time.time() - start, 2)
         })
         
@@ -399,7 +359,7 @@ def health():
 
 if __name__ == '__main__':
     print("\n" + "="*50)
-    print("AI SANDBOX BRIDGE v55.0")
+    print("AI SANDBOX BRIDGE v58.0")
     print("="*50)
     app.run(host='0.0.0.0', port=9999, debug=False, use_reloader=False)
 EOF
@@ -425,28 +385,14 @@ curl -s -X POST http://localhost:9999/execute \
 EOF
 chmod +x test.sh
 
-cat > debug.sh << 'EOF'
-#!/bin/bash
-echo "=== DERNIER TEST QEMU ==="
-tail -80 /root/ai_sandbox/logs/qemu_test.log
-echo ""
-echo "=== MODULES DANS INITRAMFS ==="
-ls -la /root/ai_sandbox/initrd.img 2>/dev/null
-EOF
-chmod +x debug.sh
-
 # =============================================================================
 # FIN
 # =============================================================================
 echo ""
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}✅ INSTALLATION v55.0 TERMINEE${NC}"
+echo -e "${GREEN}✅ INSTALLATION v58.0 TERMINEE${NC}"
 echo -e "${GREEN}========================================${NC}"
-echo ""
-echo "📁 Logs: $LOG_DIR"
-echo "📁 Initramfs: $(ls -lh initrd.img | awk '{print $5}')"
 echo ""
 echo "🚀 Démarrer: cd $WORK_DIR && ./start.sh"
 echo "🧪 Tester:   cd $WORK_DIR && ./test.sh"
-echo "🐛 Debug:    cd $WORK_DIR && ./debug.sh"
 echo ""
