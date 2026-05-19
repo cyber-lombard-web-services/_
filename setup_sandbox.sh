@@ -2,6 +2,7 @@
 
 # =============================================================================
 # AI SANDBOX - Version finale v58.0 (Chemin run.py corrigé)
+# By thibaut LOMBARD © copyright all rights reserved
 # =============================================================================
 
 RED='\033[0;31m'
