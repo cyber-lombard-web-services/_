@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# AI SANDBOX - Version finale v58.0 (Chemin run.py corrigé)
+# AI SANDBOX - V 68
 # By thibaut LOMBARD © copyright all rights reserved
 # =============================================================================
 
