@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# AI SANDBOX - v77.4 - Ubuntu ALPINE VM 9p
+# AI SANDBOX - v78 - Ubuntu ALPINE VM 9p
 # By thibaut LOMBARD © copyright all rights reserved
 # =============================================================================
 
@@ -30,14 +30,14 @@ fi
 log "Installation des dépendances..."
 
 apt update -qq
-apt install -y qemu-system-x86 qemu-utils curl cpio busybox-static wget squashfs-tools zstd
+apt install -y qemu-system-x86 qemu-utils curl cpio busybox-static wget squashfs-tools zstd nodejs npm gcc build-essential
 
 pip3 install flask flask-cors --break-system-packages 2>/dev/null || true
 
 ok "Dépendances installées"
 
 # =============================================================================
-# 2. TÉLÉCHARGEMENT DE L'ISO ALPINE VIRT (si non existante)
+# 2. TÉLÉCHARGEMENT DE L'ISO ALPINE VIRT
 # =============================================================================
 log "Vérification de l'ISO Alpine virt..."
 
@@ -57,7 +57,7 @@ else
 fi
 
 # =============================================================================
-# 3. EXTRACTION DU KERNEL ET MODLOOP (si non existants)
+# 3. EXTRACTION DU KERNEL ET MODLOOP
 # =============================================================================
 log "Extraction du kernel et modloop..."
 
@@ -78,29 +78,21 @@ if [ $EXTRACT_NEEDED -eq 1 ]; then
         exit 1
     fi
     
-    # Copier le kernel si nécessaire
-    if [ ! -f "vmlinuz" ]; then
-        cp "$ISO_MOUNT/boot/vmlinuz-virt" vmlinuz
-        ok "Kernel: $(ls -lh vmlinuz | awk '{print $5}')"
-    fi
-    
-    # Copier le modloop si nécessaire
-    if [ ! -f "modloop-virt" ]; then
-        cp "$ISO_MOUNT/boot/modloop-virt" modloop-virt
-        ok "Modloop: $(ls -lh modloop-virt | awk '{print $5}')"
-    fi
+    [ ! -f "vmlinuz" ] && cp "$ISO_MOUNT/boot/vmlinuz-virt" vmlinuz
+    [ ! -f "modloop-virt" ] && cp "$ISO_MOUNT/boot/modloop-virt" modloop-virt
     
     umount "$ISO_MOUNT" 2>/dev/null || umount -l "$ISO_MOUNT" 2>/dev/null
     rmdir "$ISO_MOUNT" 2>/dev/null
-else
-    ok "Kernel et modloop déjà extraits"
 fi
 
+ok "Kernel: $(ls -lh vmlinuz | awk '{print $5}')"
+ok "Modloop: $(ls -lh modloop-virt | awk '{print $5}')"
+
 # =============================================================================
-# 4. EXTRACTION DES MODULES 9P (si nécessaire)
+# 4. EXTRACTION DES MODULES
 # =============================================================================
 if [ ! -d "initramfs-modules" ] || [ -z "$(ls initramfs-modules 2>/dev/null)" ]; then
-    log "Extraction des modules 9p depuis modloop..."
+    log "Extraction des modules..."
     
     rm -rf modules_extract
     mkdir -p initramfs-modules/lib/modules modules_extract
@@ -110,27 +102,17 @@ if [ ! -d "initramfs-modules" ] || [ -z "$(ls initramfs-modules 2>/dev/null)" ];
     MODLOOP_TYPE=$(file ../modloop-virt 2>/dev/null)
     
     if echo "$MODLOOP_TYPE" | grep -qi "squashfs"; then
-        log "Modloop = SquashFS"
         unsquashfs ../modloop-virt 2>/dev/null
-        if [ -d squashfs-root ]; then
-            find squashfs-root -name "*.ko" -exec cp {} . \; 2>/dev/null
-        fi
+        [ -d squashfs-root ] && find squashfs-root -name "*.ko" -exec cp {} . \;
     elif echo "$MODLOOP_TYPE" | grep -qi "zstandard"; then
-        log "Modloop = Zstandard"
         zstdcat ../modloop-virt | cpio -idm 2>/dev/null
-    elif echo "$MODLOOP_TYPE" | grep -qi "gzip"; then
-        log "Modloop = gzip + cpio"
-        zcat ../modloop-virt | cpio -idm 2>/dev/null
     else
-        log "Tentative cpio direct..."
-        cpio -idm < ../modloop-virt 2>/dev/null
+        zcat ../modloop-virt | cpio -idm 2>/dev/null
     fi
     
     cd ..
     
-    # Copie des modules
     find modules_extract -name "9p*.ko" -exec cp {} initramfs-modules/lib/modules/ \; 2>/dev/null
-    find modules_extract -name "9p*.ko.*" -exec cp {} initramfs-modules/lib/modules/ \; 2>/dev/null
     find modules_extract -name "virtio*.ko" -exec cp {} initramfs-modules/lib/modules/ \; 2>/dev/null
     find modules_extract -name "netfs.ko" -exec cp {} initramfs-modules/lib/modules/ \; 2>/dev/null
     
@@ -138,17 +120,24 @@ if [ ! -d "initramfs-modules" ] || [ -z "$(ls initramfs-modules 2>/dev/null)" ];
     ok "$NB_MODULES modules extraits"
     
     rm -rf modules_extract
-else
-    ok "Modules déjà extraits"
 fi
 
 # =============================================================================
-# 5. CONSTRUCTION DE L'INITRAMFS AVEC TOUTES LES LIBS PYTHON
+# 5. CRÉATION DU DISQUE PERSISTANT
+# =============================================================================
+if [ ! -f "disk.qcow2" ]; then
+    log "Création du disque persistant (2GB)..."
+    qemu-img create -f qcow2 disk.qcow2 2G
+    ok "Disque créé: disk.qcow2"
+fi
+
+# =============================================================================
+# 6. CONSTRUCTION DE L'INITRAMFS
 # =============================================================================
 log "Construction de l'initramfs..."
 
 rm -rf initramfs
-mkdir -p initramfs/{bin,sbin,dev,proc,sys,mnt,tmp,etc,usr/bin,usr/lib,lib,lib64,modules,run,root}
+mkdir -p initramfs/{bin,sbin,dev,proc,sys,mnt,tmp,etc,usr/bin,usr/lib,lib,lib64,modules,run,root,var}
 
 # Busybox
 cp $(which busybox) initramfs/bin/busybox
@@ -170,74 +159,62 @@ if [ -d "/usr/lib/python$PYVER" ]; then
     cp -r "/usr/lib/python$PYVER" initramfs/usr/lib/ 2>/dev/null
 fi
 
+# Node.js
+if [ -f /usr/bin/node ]; then
+    cp /usr/bin/node initramfs/usr/bin/
+    cp /usr/bin/npm initramfs/usr/bin/ 2>/dev/null
+fi
+
+# GCC et outils de compilation
+if [ -f /usr/bin/gcc ]; then
+    mkdir -p initramfs/usr/bin initramfs/usr/lib/gcc
+    cp /usr/bin/gcc initramfs/usr/bin/
+    cp /usr/bin/g++ initramfs/usr/bin/ 2>/dev/null
+    cp -r /usr/lib/gcc/x86_64-linux-gnu/* initramfs/usr/lib/gcc/ 2>/dev/null
+fi
+
 # =============================================================================
-# COPIE AUTO DE TOUTES LES LIBS NÉCESSAIRES (ldd)
+# COPIE AUTO DE TOUTES LES LIBS NÉCESSAIRES
 # =============================================================================
 log "Analyse et copie des bibliothèques..."
 
-# Fonction: copier toutes les libs d'un binaire
 copy_binary_libs() {
     local binary="$1"
     [ ! -f "$binary" ] && return
     
-    ldd "$binary" 2>/dev/null | while read line; do
-        # Extraire le chemin de la lib
-        local libpath=$(echo "$line" | grep -o '/[^ ]*' | head -1)
-        if [ -n "$libpath" ] && [ -f "$libpath" ]; then
-            local dest="initramfs$libpath"
+    ldd "$binary" 2>/dev/null | grep -o '/[^ ]*' | while read lib; do
+        if [ -f "$lib" ]; then
+            local dest="initramfs$lib"
             mkdir -p "$(dirname "$dest")"
-            cp -L "$libpath" "$dest" 2>/dev/null
+            cp -L "$lib" "$dest" 2>/dev/null
         fi
     done
 }
 
-# Copier les libs de python3
-copy_binary_libs /usr/bin/python3
+for bin in /usr/bin/python3 /usr/bin/node /usr/bin/gcc; do
+    [ -f "$bin" ] && copy_binary_libs "$bin"
+done
 
-# Copier les libs de libpython
 LIBPYTHON=$(find /usr/lib -maxdepth 2 -name "libpython${PYVER}*.so*" 2>/dev/null | head -1)
 if [ -n "$LIBPYTHON" ]; then
-    log "LibPython trouvée: $LIBPYTHON"
     copy_binary_libs "$LIBPYTHON"
     cp -L "$LIBPYTHON" initramfs/usr/lib/ 2>/dev/null
 fi
 
-# Copier les libs supplémentaires courantes
-for lib in /usr/lib/x86_64-linux-gnu/libz.so* \
-           /usr/lib/x86_64-linux-gnu/libexpat.so* \
-           /usr/lib/x86_64-linux-gnu/libssl.so* \
-           /usr/lib/x86_64-linux-gnu/libcrypto.so* \
-           /usr/lib/x86_64-linux-gnu/libffi.so* \
-           /usr/lib/x86_64-linux-gnu/libdl.so* \
-           /usr/lib/x86_64-linux-gnu/libpthread.so* \
-           /usr/lib/x86_64-linux-gnu/libutil.so*; do
-    [ -f "$lib" ] && cp -L "$lib" initramfs/usr/lib/ 2>/dev/null
-done
-
-# Lien ld-linux dans /lib64 (python3 l'attend là)
-mkdir -p initramfs/lib64
-if [ -f "initramfs/lib/ld-linux-x86-64.so.2" ]; then
-    ln -sf /lib/ld-linux-x86-64.so.2 initramfs/lib64/ld-linux-x86-64.so.2 2>/dev/null
-elif [ -f "initramfs/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" ]; then
-    cp initramfs/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 initramfs/lib64/ 2>/dev/null
-fi
-
-# Créer ld.so.cache
+# Fichiers de configuration
 mkdir -p initramfs/etc
-echo "/lib" > initramfs/etc/ld.so.conf
-echo "/usr/lib" >> initramfs/etc/ld.so.conf
-echo "/usr/lib/x86_64-linux-gnu" >> initramfs/etc/ld.so.conf
-ldconfig -r initramfs 2>/dev/null || true
+echo "nameserver 8.8.8.8" > initramfs/etc/resolv.conf
+echo "nameserver 1.1.1.1" >> initramfs/etc/resolv.conf
 
-# Vérification: tester python en chroot
-log "Vérification Python dans l'initramfs..."
-if chroot initramfs /usr/bin/python3 -c "print('Python OK')" 2>/dev/null; then
-    ok "Python fonctionne dans l'initramfs"
-else
-    err "Python ne fonctionne pas dans l'initramfs"
-    echo "Liste des libs copiées:"
-    find initramfs -name "*.so*" 2>/dev/null | head -20
-fi
+cat > initramfs/etc/passwd << 'PASSWD'
+root:x:0:0:root:/root:/bin/sh
+nobody:x:65534:65534:nobody:/:/sbin/nologin
+PASSWD
+
+cat > initramfs/etc/group << 'GROUP'
+root:x:0:
+nobody:x:65534:
+GROUP
 
 # Modules kernel
 if [ -d initramfs-modules/lib/modules ]; then
@@ -245,7 +222,7 @@ if [ -d initramfs-modules/lib/modules ]; then
 fi
 
 # =============================================================================
-# 6. AGENT DAEMON
+# 7. AGENT DAEMON
 # =============================================================================
 cat > agent_daemon.py << 'DAEMONEOF'
 #!/usr/bin/python3
@@ -256,6 +233,7 @@ import traceback
 import time
 import os
 import fcntl
+import subprocess
 
 REQUEST_FILE = "/mnt/request.json"
 RESPONSE_FILE = "/mnt/response.json"
@@ -282,7 +260,7 @@ def main():
     try:
         with open(READY_FILE, "w") as f:
             f.write("ready")
-        print("Agent v77.4 ready", file=sys.stderr)
+        print("Agent v78.0 ready", file=sys.stderr)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
     
@@ -300,6 +278,10 @@ def main():
                     os.remove(REQUEST_FILE)
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 lock_fd.close()
+                try:
+                    os.remove(LOCK_FILE)
+                except:
+                    pass
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
         time.sleep(0.008)
@@ -310,75 +292,6 @@ DAEMONEOF
 chmod +x agent_daemon.py
 
 # =============================================================================
-# 7. AGENT COLD
-# =============================================================================
-cat > agent_cold.py << 'COLDOEF'
-#!/usr/bin/python3
-import sys
-import io
-import traceback
-import os
-
-if len(sys.argv) < 2:
-    print("ERREUR: pas de script")
-    sys.exit(1)
-
-SCRIPT_FILE = sys.argv[1]
-RESULT_FILE = "/mnt/result.txt"
-OUTPUT_FILE = "/mnt/output.txt"
-
-print("=" * 50)
-print("EXECUTION SANDBOX v77.4")
-print("=" * 50)
-print(f"Script: {SCRIPT_FILE}")
-print("-" * 40)
-
-try:
-    with open(SCRIPT_FILE, 'r') as f:
-        code = f.read()
-    
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    sys.stdout = io.StringIO()
-    sys.stderr = io.StringIO()
-    
-    try:
-        exec(code, {'__name__': '__main__'})
-        output = sys.stdout.getvalue()
-        error = sys.stderr.getvalue()
-        
-        if output:
-            print(output, end='')
-        if error:
-            print(f"[STDERR]\n{error}", end='')
-        
-        with open(OUTPUT_FILE, 'w') as f:
-            f.write(output)
-        if error:
-            with open(OUTPUT_FILE, 'a') as f:
-                f.write("\n[STDERR]\n" + error)
-        with open(RESULT_FILE, 'w') as f:
-            f.write("SUCCESS")
-        
-        print("-" * 40)
-        print("SUCCES")
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-        
-except Exception as e:
-    print(f"ERREUR: {e}")
-    traceback.print_exc()
-    with open(RESULT_FILE, 'w') as f:
-        f.write(f"ERROR: {str(e)}")
-    with open(OUTPUT_FILE, 'w') as f:
-        f.write(traceback.format_exc())
-
-print("=" * 50)
-COLDOEF
-chmod +x agent_cold.py
-
-# =============================================================================
 # 8. INIT SCRIPT
 # =============================================================================
 cat > initramfs/init << 'INITEOF'
@@ -386,45 +299,58 @@ cat > initramfs/init << 'INITEOF'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
 echo "========================================="
-echo "AI SANDBOX VM v77.4"
+echo "AI SANDBOX VM v78.0"
 echo "========================================="
 
+# Mount de base
 /bin/busybox mount -t proc proc /proc
 /bin/busybox mount -t sysfs sysfs /sys
 /bin/busybox mount -t devtmpfs devtmpfs /dev
 /bin/busybox mkdir -p /tmp /mnt
 /bin/busybox mount -t tmpfs tmpfs /tmp
 
-echo "[1/3] Chargement modules..."
+echo "[1/4] Chargement modules..."
 if [ -d /modules ]; then
-    for mod in netfs 9pnet 9pnet_virtio 9p; do
+    for mod in netfs 9pnet 9pnet_virtio 9p virtio virtio_pci virtio_ring; do
         if [ -f "/modules/$mod.ko" ]; then
-            /bin/busybox insmod "/modules/$mod.ko" 2>/dev/null && echo "→ $mod chargé"
+            /bin/busybox insmod "/modules/$mod.ko" 2>/dev/null && echo "→ $mod"
         fi
     done
 fi
 
-echo "[2/3] Montage 9p..."
+echo "[2/4] Montage 9p..."
 /bin/busybox mount -t 9p -o trans=virtio,version=9p2000.L m /mnt 2>/dev/null && echo " ✓ 9p monté"
 
-if [ -f /mnt/.daemon_mode ]; then
-    echo "▶ Mode démon v77.4"
+echo "[3/4] Configuration réseau..."
+if [ -d /sys/class/net ]; then
+    for iface in $(ls /sys/class/net); do
+        case "$iface" in
+            lo|sit*|tun*|docker*) continue ;;
+            *)
+                /bin/busybox ip link set "$iface" up 2>/dev/null
+                /bin/busybox udhcpc -i "$iface" -q 2>/dev/null &
+                ;;
+        esac
+    done
+fi
+
+echo "[4/4] Mode de fonctionnement..."
+if [ -f "/mnt/.daemon_mode" ]; then
+    echo "▶ MODE DAEMON v78.0"
     /usr/bin/python3 /agent_daemon.py 2>&1 &
     echo "VM persistante prête"
     while true; do sleep 3600; done
 else
-    echo "▶ Mode cold start"
-    [ ! -f /mnt/user_script.py ] && /bin/busybox poweroff -f
-    echo "=== DEBUT EXECUTION ==="
-    /usr/bin/python3 /agent_cold.py /mnt/user_script.py 2>&1
-    echo "=== FIN EXECUTION ==="
-    /bin/busybox poweroff -f
+    echo "▶ MODE COLD START"
+    if [ -f "/mnt/user_script.py" ]; then
+        /usr/bin/python3 /agent_cold.py /mnt/user_script.py 2>&1
+    fi
+    poweroff -f
 fi
 INITEOF
 chmod 755 initramfs/init
 
-# Copier les agents
-cp agent_daemon.py agent_cold.py initramfs/
+cp agent_daemon.py initramfs/
 
 # Build initramfs
 cd initramfs
@@ -433,9 +359,6 @@ cd ..
 
 SIZE=$(ls -lh initrd.img | awk '{print $5}')
 ok "Initramfs construit: $SIZE"
-
-# Ne pas supprimer initramfs pour debug possible
-# rm -rf initramfs
 
 # =============================================================================
 # 9. VM MANAGER
@@ -457,19 +380,23 @@ start_vm() {
     pkill -f "qemu-system-x86" 2>/dev/null
     sleep 1
     
-    touch "$MODE_FILE"
+    echo "daemon" > "$MODE_FILE"
     rm -f "$READY_FILE" request.json response.json request.lock
     
-    echo "Démarrage VM..."
+    echo "Démarrage VM v78.0..."
+    
     nohup qemu-system-x86_64 \
         -nographic \
-        -m 1024 \
+        -m 2048 \
         -smp 2 \
         -kernel "$WORK_DIR/vmlinuz" \
         -initrd "$WORK_DIR/initrd.img" \
         -append "console=ttyS0" \
         -fsdev local,security_model=none,id=fsdev0,path=$WORK_DIR \
         -device virtio-9p-pci,fsdev=fsdev0,mount_tag=m \
+        -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+        -device virtio-net-pci,netdev=net0 \
+        -drive file=$WORK_DIR/disk.qcow2,format=qcow2,if=virtio \
         -no-reboot \
         > "$LOG_DIR/vm_daemon.log" 2>&1 &
     
@@ -477,7 +404,7 @@ start_vm() {
     echo $PID > "$VM_PID_FILE"
     echo "VM lancée (PID: $PID)"
     
-    for i in $(seq 1 35); do
+    for i in $(seq 1 45); do
         if [ -f "$READY_FILE" ]; then
             echo "✅ Agent prêt après ${i}s"
             return 0
@@ -508,7 +435,7 @@ VMMANAGER
 chmod +x vm_manager.sh
 
 # =============================================================================
-# 10. BRIDGE FLASK
+# 10. BRIDGE FLASK (avec locks corrigés)
 # =============================================================================
 cat > bridge.py << 'BRIDGEPY'
 #!/usr/bin/env python3
@@ -539,18 +466,33 @@ VM_MANAGER = WORK / "vm_manager.sh"
 def is_daemon_mode():
     return MODE_FILE.exists()
 
-def send_to_agent_file(code, timeout=6):
+def acquire_lock():
+    try:
+        lock_fd = open(LOCK_FILE, 'w')
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_fd
+    except:
+        return None
+
+def release_lock(lock_fd):
+    if lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+        try:
+            LOCK_FILE.unlink(missing_ok=True)
+        except:
+            pass
+
+def send_to_agent_file(code, timeout=8):
     start = time.time()
     RESPONSE_FILE.unlink(missing_ok=True)
     
     lock_fd = None
     while time.time() - start < timeout:
-        try:
-            lock_fd = open(LOCK_FILE, 'w')
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fd = acquire_lock()
+        if lock_fd:
             break
-        except:
-            time.sleep(0.005)
+        time.sleep(0.005)
     
     if not lock_fd:
         return {"status": "error", "error": "Lock timeout"}
@@ -558,12 +500,10 @@ def send_to_agent_file(code, timeout=6):
     try:
         REQUEST_FILE.write_text(json.dumps({"code": code}))
     except Exception as e:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+        release_lock(lock_fd)
         return {"status": "error", "error": f"Write error: {e}"}
     
-    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-    lock_fd.close()
+    release_lock(lock_fd)
     
     while time.time() - start < timeout:
         if RESPONSE_FILE.exists():
@@ -591,7 +531,7 @@ def execute():
         
         if not READY_FILE.exists():
             subprocess.run([str(VM_MANAGER), "start"], capture_output=True)
-            for i in range(30):
+            for i in range(40):
                 if READY_FILE.exists():
                     break
                 time.sleep(0.5)
@@ -623,13 +563,19 @@ def health():
         "status": "ok",
         "mode": "daemon" if is_daemon_mode() else "cold",
         "agent_ready": READY_FILE.exists(),
-        "version": "v77.4"
+        "version": "v78.0"
     })
 
+def signal_handler(sig, frame):
+    print("\nArrêt du bridge...")
+    sys.exit(0)
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     mode = "daemon" if is_daemon_mode() else "cold"
     print("\n" + "="*50)
-    print(f"AI SANDBOX BRIDGE v77.4 - Mode: {mode.upper()}")
+    print(f"AI SANDBOX BRIDGE v78.0 - Mode: {mode.upper()}")
     print("="*50 + "\n")
     app.run(host='0.0.0.0', port=9999, debug=False)
 BRIDGEPY
@@ -641,21 +587,17 @@ chmod +x bridge.py
 cat > start.sh << 'STARTSCRIPT'
 #!/bin/bash
 cd /root/ai_sandbox
-
 echo "========================================="
-echo "AI SANDBOX v77.4 - Démarrage"
+echo "AI SANDBOX v78.0 - Démarrage"
 echo "========================================="
-
 cleanup() { echo ""; ./stop.sh; exit 0; }
 trap cleanup INT TERM
-
 ./vm_manager.sh start
-
 echo ""
 echo "Bridge API sur http://localhost:9999"
+echo "SSH: ssh -p 2222 root@localhost (si configuré)"
 echo "Ctrl+C pour arrêter"
 echo ""
-
 python3 bridge.py
 STARTSCRIPT
 chmod +x start.sh
@@ -671,7 +613,7 @@ chmod +x stop.sh
 
 cat > test.sh << 'TESTSCRIPT'
 #!/bin/bash
-echo "=== Test Sandbox v77.4 ==="
+echo "=== Test Sandbox v78.0 ==="
 curl -s -X POST http://localhost:9999/execute \
   -H "Content-Type: application/json" \
   -d '{"code":"print(\"Hello Sandbox!\")"}' | python3 -m json.tool
@@ -681,7 +623,7 @@ chmod +x test.sh
 cat > debug.sh << 'DEBUGSCRIPT'
 #!/bin/bash
 cd /root/ai_sandbox
-echo "=== DEBUG v77.4 ==="
+echo "=== DEBUG v78.0 ==="
 echo "agent_ready: $(cat agent_ready 2>/dev/null || echo 'NON')"
 echo ".daemon_mode: $(cat .daemon_mode 2>/dev/null || echo 'NON')"
 echo ""
@@ -717,4 +659,8 @@ echo "   sandbox-start   # Démarrer"
 echo "   sandbox-stop    # Arrêter"
 echo "   sandbox-test    # Tester"
 echo "   sandbox-debug   # Debug"
+echo ""
+echo "📡 SSH: ssh -p 2222 root@localhost (si configuré dans la VM)"
+echo "💾 Disque persistant: disk.qcow2"
+echo "🐍 Python, Node.js, GCC disponibles dans la VM"
 echo ""
