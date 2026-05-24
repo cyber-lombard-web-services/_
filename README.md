@@ -1,8 +1,9 @@
+<h1 align="center">NAFIS & AI Sandbox</h1>
+
 <p align="center">
   <img src="nafis-demo.gif" alt="NAFIS Demo" width="800">
 </p>
 
-<h1 align="center">NAFI & AI Sandbox</h1>
 
 > **NAFIS** — CLI multi-modèles IA avec intégration sandbox QEMU  
 > **AI Sandbox** — Environnement d'exécution isolé pour code Python, Node.js et GCC sous QEMU/KVM
