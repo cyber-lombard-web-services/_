@@ -1,7 +1,7 @@
 <h1 align="center">NAFIS & AI Sandbox</h1>
 
 <p align="center">
-  <img src="nafis-demo.gif" alt="NAFIS Demo" width="800">
+  <img src="nafis-demo.gif" alt="NAFIS Demo" width="400">
 </p>
 
 
